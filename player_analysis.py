@@ -113,6 +113,7 @@ def analyze_player_trends(player_game_log_df, player_info=None):
         "reb_history": reb_history,
         "ast_history": ast_history,
         "usage_rate": usage_rate,
+        "is_missing": False, # Will be set by get_full_player_analysis
     }
 
 
@@ -299,7 +300,21 @@ def get_full_player_analysis(team_id):
         # Compute scores
         consistency = compute_consistency_score(analysis)
         fatigue = detect_fatigue(game_log)
+        
+        # --- IMPROVED ABSENCE DETECTION ---
+        is_missing = False
+        if game_log is not None and not game_log.empty:
+            # Check most recent game minutes vs expected
+            last_game_mins = pd.to_numeric(game_log.iloc[0].get("MIN", 0), errors="coerce")
+            if last_game_mins < 2 and player_info.get("min_per_game", 0) > 15:
+                is_missing = True
+        
+        analysis["is_missing"] = is_missing
+        
         impact = compute_player_impact_score(analysis, consistency, fatigue)
+        
+        # Boost impact of remaining stars if some are missing? 
+        # (This will be handled in the analytics engine during the game-aware phase)
 
         player_analyses.append({
             **analysis,
@@ -309,6 +324,7 @@ def get_full_player_analysis(team_id):
             "consistency_score": consistency,
             "fatigue": fatigue,
             "impact_score": impact,
+            "is_missing": is_missing,
         })
 
     # Sort by impact score

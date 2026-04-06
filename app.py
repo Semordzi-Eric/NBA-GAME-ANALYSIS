@@ -31,36 +31,80 @@ if "game_analyses" not in st.session_state:
     st.session_state.game_analyses = {}
 if "games" not in st.session_state:
     st.session_state.games = []
+if "active_tab" not in st.session_state:
+    st.session_state.active_tab = "📊 Today's Games"
 
 # ─── Custom CSS ───────────────────────────────────────────────────────
 def inject_custom_css():
     st.markdown(f"""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=Outfit:wght@500;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=Outfit:wght@500;700&family=JetBrains+Mono:wght@500&display=swap');
     
-    html, body, [class*="css"] {{ font-family: 'Inter', sans-serif; }}
+    html, body, [class*="css"] {{ font-family: 'Inter', sans-serif; transition: all 0.2s ease-in-out; }}
     .stApp {{ background-color: {UI_COLORS['bg_primary']}; color: {UI_COLORS['text_primary']}; }}
     
+    /* Header Typography */
     h1 {{
         font-family: 'Outfit', sans-serif !important; font-weight: 800 !important;
         background: linear-gradient(135deg, {UI_COLORS['accent']}, {UI_COLORS['accent_secondary']});
-        -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 0.5rem;
+        -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 0.5rem; letter-spacing: -0.02em;
+    }}
+    h2, h3 {{ font-family: 'Outfit', sans-serif !important; font-weight: 700 !important; }}
+    
+    /* Global Glass Card Style */
+    .glass-card {{
+        background: {UI_COLORS['bg_card']} !important;
+        backdrop-filter: blur(16px) saturate(180%) !important;
+        -webkit-backdrop-filter: blur(16px) saturate(180%) !important;
+        border: 1px solid {UI_COLORS['border']} !important;
+        border-radius: 16px !important;
+        padding: 24px !important;
+        margin-bottom: 20px !important;
+        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37) !important;
     }}
     
+    /* Metric Container Overhaul */
     [data-testid="metric-container"] {{
-        background: {UI_COLORS['bg_card']} !important;
-        backdrop-filter: blur(12px) !important;
-        border: 1px solid {UI_COLORS['border']} !important;
-        border-radius: 12px !important; padding: 20px !important;
-        transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1) !important;
+        background: rgba(255, 255, 255, 0.03) !important;
+        border: 1px solid rgba(255, 255, 255, 0.1) !important;
+        border-radius: 12px !important; padding: 16px !important;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
     }}
     [data-testid="metric-container"]:hover {{
-        transform: translateY(-4px) !important; border-color: rgba(0, 212, 170, 0.4) !important;
+        background: rgba(255, 255, 255, 0.05) !important;
+        transform: translateY(-2px) !important; border-color: {UI_COLORS['accent']} !important;
     }}
     
+    /* Sidebar Styling */
+    section[data-testid="stSidebar"] {{
+        background-color: {UI_COLORS['bg_secondary']} !important;
+        border-right: 1px solid {UI_COLORS['border']} !important;
+    }}
+    
+    /* Buttons */
     .stButton > button {{
         background: linear-gradient(135deg, {UI_COLORS['accent']}, #00A383);
-        color: #fff !important; font-weight: 600 !important; border-radius: 8px !important; border: none !important;
+        color: #fff !important; font-weight: 600 !important; 
+        border-radius: 10px !important; border: none !important;
+        padding: 0.6rem 1.2rem !important; transition: all 0.3s ease !important;
+        text-transform: uppercase; letter-spacing: 0.05em; font-size: 0.85rem !important;
+    }}
+    .stButton > button:hover {{
+        transform: scale(1.02) !important; box-shadow: 0 0 20px rgba(0, 212, 170, 0.3) !important;
+    }}
+    
+    /* Selection Cards */
+    .game-card {{
+        cursor: pointer; transition: all 0.3s ease;
+        border: 1px solid {UI_COLORS['border']}; border-radius: 12px;
+        padding: 16px; margin-bottom: 12px; background: {UI_COLORS['bg_secondary']};
+    }}
+    .game-card:hover {{ border-color: {UI_COLORS['accent']}; background: {UI_COLORS['bg_card']}; }}
+    
+    /* Odds Display */
+    .odds-badge {{
+        font-family: 'JetBrains+Mono', monospace; background: rgba(0, 212, 170, 0.1);
+        color: {UI_COLORS['accent']}; padding: 4px 8px; border-radius: 6px; font-weight: bold;
     }}
     </style>
     """, unsafe_allow_html=True)
@@ -168,12 +212,30 @@ def render_todays_games():
     for i, game in enumerate(st.session_state.games):
         col = cols[i % 3]
         with col:
-            st.markdown(f"### {game['away_team_abbr']} @ {game['home_team_abbr']}")
-            st.caption(game.get('game_status_text', 'Scheduled'))
-            if st.button(f"Analyze Matchup", key=f"btn_{game['game_id']}"):
+            st.markdown(f"""
+            <div style="background: {UI_COLORS['bg_card']}; border: 1px solid {UI_COLORS['border']}; border-radius: 16px; padding: 20px; margin-bottom: 15px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                    <span style="background: rgba(255,255,255,0.05); padding: 4px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: bold; color: {UI_COLORS['text_secondary']};">{game.get('game_status_text', 'Scheduled')}</span>
+                    <span style="font-family: 'JetBrains Mono'; font-size: 0.8rem; color: {UI_COLORS['accent']}; font-weight: bold;">{game['game_id'][-4:]}</span>
+                </div>
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <span style="font-size: 1.1rem; font-weight: 800;">{game['away_team_abbr']}</span>
+                        <span style="font-weight: bold; color: {UI_COLORS['text_secondary']};">@</span>
+                        <span style="font-size: 1.1rem; font-weight: 800;">{game['home_team_abbr']}</span>
+                    </div>
+                    <div style="display: flex; justify-content: center; gap: 40px; margin-top: 5px;">
+                        <span style="font-size: 0.8rem; color: {UI_COLORS['text_secondary']};">{game['away_team_city']}</span>
+                        <span style="font-size: 0.8rem; color: {UI_COLORS['text_secondary']};">{game['home_team_city']}</span>
+                    </div>
+                </div>
+                <div style="margin-top: 15px; display: flex; justify-content: center;"></div>
+            </div>
+            """, unsafe_allow_html=True)
+            if st.button(f"Analyze {game['away_team_abbr']} @ {game['home_team_abbr']}", key=f"btn_{game['game_id']}", use_container_width=True):
                 st.session_state.selected_game_id = game['game_id']
-                st.toast(f"Matchup {game['away_team_abbr']} @ {game['home_team_abbr']} selected! Click the 'Matchup Deep Dive' tab.", icon="📊")
-                time.sleep(1) # Give user a second to read before rerun clears toast
+                st.session_state.active_tab = "🔬 Matchup Deep Dive"
+                st.toast(f"Matchup {game['away_team_abbr']} @ {game['home_team_abbr']} selected!", icon="📊")
                 st.rerun()
 
 def main():
@@ -182,12 +244,29 @@ def main():
     st.title("🏀 NBA Parlay Generator")
     risk_pref, parlay_legs, api_key, use_demo, game_date = render_sidebar()
     
-    tab1, tab2, tab3 = st.tabs(["📊 Today's Games", "🔬 Matchup Deep Dive", "🎯 Parlay Generator"])
+    # Custom Navigation
+    tabs = ["📊 Today's Games", "🔬 Matchup Deep Dive", "🎯 Parlay Generator"]
     
-    with tab1:
+    # We use a segmented control for a premium feel and programmatic switching
+    selected_tab = st.segmented_control(
+        "Navigation", 
+        options=tabs, 
+        selection_mode="single", 
+        default=st.session_state.active_tab,
+        key="nav_bar",
+        label_visibility="collapsed"
+    )
+    
+    # Sync segmented control back to session state if it changed manually
+    if selected_tab and selected_tab != st.session_state.active_tab:
+        st.session_state.active_tab = selected_tab
+
+    st.divider()
+
+    if st.session_state.active_tab == "📊 Today's Games":
         render_todays_games()
         
-    with tab2:
+    elif st.session_state.active_tab == "🔬 Matchup Deep Dive":
         if st.session_state.selected_game_id and st.session_state.selected_game_id in st.session_state.game_analyses:
             render_matchup_deep_dive(
                 st.session_state.selected_game_id, 
@@ -197,12 +276,13 @@ def main():
         else:
             st.info("Select 'Analyze Matchup' from the Today's Games tab to view deep dive stats.")
 
-    with tab3:
+    elif st.session_state.active_tab == "🎯 Parlay Generator":
         st.header("Recommended Parlays")
         if not st.session_state.all_bets_by_game:
             st.info("Please fetch data first.")
         else:
             # Enforce 4-8 leg config
+            from config import PARLAY_CONFIG
             PARLAY_CONFIG['min_legs'] = parlay_legs
             PARLAY_CONFIG['max_legs'] = parlay_legs
             
@@ -214,26 +294,55 @@ def main():
                 for idx, p in enumerate(parlays):
                     formatted = format_parlay_for_display(p, rank=idx+1)
                     
-                    st.markdown(f"<h2>{formatted['title']} — {formatted['subtitle']} {formatted['risk_emoji']}</h2>", unsafe_allow_html=True)
+                    st.markdown(f"""
+                    <div class="glass-card" style="padding: 0px; overflow: hidden; border-top: 4px solid {formatted['risk_color']};">
+                        <div style="background: rgba(255,255,255,0.02); padding: 20px; border-bottom: 1px solid {UI_COLORS['border']};">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <h2 style="margin: 0; color: {UI_COLORS['text_primary']};">{formatted['title']}</h2>
+                                <span style="background: {formatted['risk_bg']}; color: {formatted['risk_color']}; padding: 6px 12px; border-radius: 8px; font-weight: 800; font-size: 0.8rem; letter-spacing: 0.1em;">{formatted['risk_emoji']} {formatted['risk_level'].upper()} RISK</span>
+                            </div>
+                            <div style="color: {UI_COLORS['text_secondary']}; font-size: 0.9rem; margin-top: 4px;">{formatted['subtitle']}</div>
+                        </div>
+                        
+                        <div style="padding: 24px;">
+                            <div style="display: flex; justify-content: space-between; margin-bottom: 25px; gap: 15px;">
+                                <div style="text-align: center; flex: 1;">
+                                    <div style="color: {UI_COLORS['text_secondary']}; font-size: 0.75rem; text-transform: uppercase; margin-bottom: 5px;">Combined Odds</div>
+                                    <div style="font-family: 'JetBrains Mono'; font-size: 1.4rem; font-weight: 800; color: {UI_COLORS['accent']};">{formatted['combined_odds']}</div>
+                                </div>
+                                <div style="text-align: center; flex: 1;">
+                                    <div style="color: {UI_COLORS['text_secondary']}; font-size: 0.75rem; text-transform: uppercase; margin-bottom: 5px;">Hit Probability</div>
+                                    <div style="font-family: 'JetBrains Mono'; font-size: 1.4rem; font-weight: 800;">{formatted['probability']*100:.1f}%</div>
+                                </div>
+                                <div style="text-align: center; flex: 1;">
+                                    <div style="color: {UI_COLORS['text_secondary']}; font-size: 0.75rem; text-transform: uppercase; margin-bottom: 5px;">EV (+)</div>
+                                    <div style="font-family: 'JetBrains Mono'; font-size: 1.4rem; font-weight: 800; color: #00D4AA;">{formatted['expected_value']:.2f}</div>
+                                </div>
+                            </div>
+                            
+                            <div style="background: rgba(0,0,0,0.2); border-radius: 12px; padding: 15px; margin-bottom: 25px; border: 1px dashed {UI_COLORS['border']};">
+                                <span style="color: {UI_COLORS['text_secondary']}; font-size: 0.85rem; font-style: italic;">{formatted['description']}</span>
+                            </div>
+
+                            <h4 style="margin-bottom: 15px; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.1em; color: {UI_COLORS['text_secondary']};">Ticket Legs</h4>
+                            <div style="display: flex; flex-direction: column; gap: 10px;">
+                    """, unsafe_allow_html=True)
                     
-                    col1, col2, col3, col4 = st.columns(4)
-                    col1.metric("Odds", formatted["combined_odds"])
-                    col2.metric("Hit Probability", f"{formatted['probability']*100:.1f}%")
-                    col3.metric("System Confidence", f"{formatted['confidence']}/100")
-                    col4.metric("Expected Value (+)", f"{formatted['expected_value']:.2f}")
-                    
-                    st.markdown(f"<p style='color: {UI_COLORS['text_secondary']}; margin-top: 5px; margin-bottom: 20px;'><i>{formatted['description']}</i></p>", unsafe_allow_html=True)
-                    
-                    st.markdown("#### Parlay Legs")
                     for leg in formatted["legs"]:
                         st.markdown(f"""
-                        <div style="background-color: {UI_COLORS['bg_secondary']}; border-left: 4px solid {UI_COLORS['accent_secondary']}; padding: 12px 16px; margin-bottom: 10px; border-radius: 4px 8px 8px 4px;">
-                            <div><b><span style="font-size: 1.2em; margin-right: 8px;">{leg.get('bet_icon', '🏀')}</span> {leg['bet_label']}</b></div>
-                            <div style="color: {UI_COLORS['text_secondary']}; font-size: 0.9em; margin-top: 4px;">{leg['explanation']}</div>
-                            <div style="font-size: 0.85em; font-weight: 600; margin-top: 4px; color: {UI_COLORS['accent']};">Implied Prob: {leg['probability']*100:.1f}%</div>
+                        <div style="background: rgba(255,255,255,0.03); border: 1px solid {UI_COLORS['border']}; padding: 12px 16px; border-radius: 10px; display: flex; justify-content: space-between; align-items: center;">
+                            <div>
+                                <div style="font-weight: 700; font-size: 1rem;"><span style="margin-right: 8px;">{leg.get('bet_icon', '🏀')}</span> {leg['bet_label']}</div>
+                                <div style="font-size: 0.8rem; color: {UI_COLORS['text_secondary']}; margin-top: 2px;">{leg['explanation']}</div>
+                            </div>
+                            <div style="text-align: right;">
+                                <div style="font-family: 'JetBrains Mono'; font-size: 0.9rem; font-weight: bold; color: {UI_COLORS['accent']};">{leg['probability']*100:.0f}%</div>
+                                <div style="font-size: 0.7rem; color: {UI_COLORS['text_secondary']};">PROB</div>
+                            </div>
                         </div>
                         """, unsafe_allow_html=True)
-                    st.divider()
+                    
+                    st.markdown("</div></div><br/>", unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()

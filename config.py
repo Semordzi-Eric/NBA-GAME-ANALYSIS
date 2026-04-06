@@ -116,6 +116,24 @@ PLAYER_IMPACT_WEIGHTS = {
     "fatigue_adj": 0.10,
 }
 
+# ─── Advanced Model Parameters ────────────────────────────────
+# Rest/Fatigue Adjustments
+REST_PENALTIES = {
+    "b2b": 4.5,            # Penalty for second night of back-to-back (points equivalent)
+    "3_in_4": 6.0,         # Penalty for 3rd game in 4 nights
+    "travel_bonus": 1.5,   # Extra penalty if travel > 1000 miles (simulated)
+}
+
+# Simple Rating System (SRS) & SOS
+SOS_WEIGHT = 0.20          # How much Strength of Schedule affects the base rating
+SOS_WINDOW = 15            # Number of recent opponents to evaluate for SOS
+
+# Injury & Impact Multipliers
+STAR_ABSENCE_PPG_MULTIPLIER = 0.85  # Offset for missing scorer (% of their PPG)
+STAR_ABSENCE_ORTG_MULTIPLIER = 0.10  # % reduction in OffRtg per star absence
+STAR_ABSENCE_DRTG_MULTIPLIER = 0.08  # % increase in DefRtg per defensive star absence
+USAGE_REDISTRIBUTION_BOOST = 1.15    # Boost to remaining stars' impact score when a teammate is out
+
 # ─── NBA Team Colors (for charts) ─────────────────────────────
 TEAM_COLORS = {
     "ATL": {"primary": "#E03A3E", "secondary": "#C1D32F"},

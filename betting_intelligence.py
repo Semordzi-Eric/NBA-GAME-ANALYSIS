@@ -14,6 +14,19 @@ def assign_risk_level(probability):
     return "avoid"
 
 
+def calculate_expected_value(probability, decimal_odds):
+    """
+    EV = (Win Prob * Profit) - (Loss Prob * Bet Amount)
+    Profit = (Decimal Odds - 1)
+    """
+    if not decimal_odds or decimal_odds <= 1:
+        return 0.0
+    profit = decimal_odds - 1
+    loss_prob = 1 - probability
+    ev = (probability * profit) - (loss_prob * 1.0)
+    return round(ev, 3)
+
+
 def probability_to_american_odds(probability):
     if probability <= 0 or probability >= 1:
         return 0
@@ -120,6 +133,9 @@ def identify_moneyline_picks(game_analysis):
         team_name = f"{game[f'{side}_team_city']} {game[f'{side}_team_name']}"
         
         if prob >= BET_TYPES["moneyline"]["min_probability"]:
+            # Initial odds based on our probability
+            odds = probability_to_decimal_odds(prob)
+            
             bet = {
                 "bet_id": f"{game['game_id']}_ml_{side}",
                 "game_id": game["game_id"],
@@ -132,7 +148,8 @@ def identify_moneyline_picks(game_analysis):
                 "probability": round(prob, 3),
                 "risk_level": assign_risk_level(prob),
                 "american_odds": probability_to_american_odds(prob),
-                "decimal_odds": probability_to_decimal_odds(prob),
+                "decimal_odds": odds,
+                "expected_value": calculate_expected_value(prob, odds),
                 "missing_players": pred.get(f"{opp}_missing_players", []),
             }
             bet["explanation"] = generate_bet_explanation(bet)
@@ -156,13 +173,15 @@ def identify_point_spread_picks(game_analysis):
         
         margin = pred_spread if is_home else -pred_spread
         
-        # Calculate a conservative alt-spread (giving 4.5 points of cushion)
+        # Fallback to a conservative alt-spread (giving 4.5 points of cushion)
+        # Note: apply_live_odds will later override this with real market lines if available
         alt_line = round(-(margin - 4.5) * 2) / 2
         
         prob = get_spread_prob(margin, alt_line, std=12.5)
         
         if prob >= BET_TYPES["point_spread"]["min_probability"]:
             sign = "+" if alt_line > 0 else ""
+            odds = probability_to_decimal_odds(prob)
             bet = {
                 "bet_id": f"{game['game_id']}_spread_{side}",
                 "game_id": game["game_id"],
@@ -171,12 +190,14 @@ def identify_point_spread_picks(game_analysis):
                 "bet_icon": BET_TYPES["point_spread"]["icon"],
                 "team_abbr": team_abbr,
                 "team_name": team_name,
+                "is_home": is_home,
                 "line": alt_line,
                 "predicted_margin": margin,
                 "probability": round(prob, 3),
                 "risk_level": assign_risk_level(prob),
                 "american_odds": probability_to_american_odds(prob),
-                "decimal_odds": probability_to_decimal_odds(prob),
+                "decimal_odds": odds,
+                "expected_value": calculate_expected_value(prob, odds),
                 "missing_players": pred.get(f"{opp}_missing_players", []),
             }
             bet["explanation"] = generate_bet_explanation(bet)
@@ -198,6 +219,7 @@ def identify_game_totals(game_analysis):
     over_prob = get_total_prob(projected, over_line, std, is_over=True)
     
     if over_prob >= BET_TYPES["game_total_over"]["min_probability"]:
+        odds = probability_to_decimal_odds(over_prob)
         bet = {
             "bet_id": f"{game['game_id']}_gto",
             "game_id": game["game_id"],
@@ -209,7 +231,8 @@ def identify_game_totals(game_analysis):
             "probability": round(over_prob, 3),
             "risk_level": assign_risk_level(over_prob),
             "american_odds": probability_to_american_odds(over_prob),
-            "decimal_odds": probability_to_decimal_odds(over_prob),
+            "decimal_odds": odds,
+            "expected_value": calculate_expected_value(over_prob, odds),
         }
         bet["explanation"] = generate_bet_explanation(bet)
         bets.append(bet)
@@ -219,6 +242,7 @@ def identify_game_totals(game_analysis):
     under_prob = get_total_prob(projected, under_line, std, is_over=False)
     
     if under_prob >= BET_TYPES["game_total_under"]["min_probability"]:
+        odds = probability_to_decimal_odds(under_prob)
         bet = {
             "bet_id": f"{game['game_id']}_gtu",
             "game_id": game["game_id"],
@@ -230,7 +254,8 @@ def identify_game_totals(game_analysis):
             "probability": round(under_prob, 3),
             "risk_level": assign_risk_level(under_prob),
             "american_odds": probability_to_american_odds(under_prob),
-            "decimal_odds": probability_to_decimal_odds(under_prob),
+            "decimal_odds": odds,
+            "expected_value": calculate_expected_value(under_prob, odds),
         }
         bet["explanation"] = generate_bet_explanation(bet)
         bets.append(bet)

@@ -4,7 +4,52 @@ Computes team strength scores, recent form, and matchup analysis.
 """
 import pandas as pd
 import numpy as np
-from config import TEAM_STRENGTH_WEIGHTS, HOME_COURT_ADVANTAGE, RECENT_GAMES_WINDOW
+from config import TEAM_STRENGTH_WEIGHTS, HOME_COURT_ADVANTAGE, RECENT_GAMES_WINDOW, SOS_WEIGHT
+
+
+def calculate_strength_of_schedule(opponents, standings_df):
+    """Get win rates of opponents from standings"""
+    # Robust column detection
+    cols = standings_df.columns
+    win_pct_col = next((c for c in ["WinPCT", "W_PCT", "WIN_PCT"] if c in cols), None)
+    abbr_col = next((c for c in ["TeamAbbreviation", "TEAM_ABBREVIATION", "Abbreviation", "TEAM_ABBR"] if c in cols), None)
+    
+    if not win_pct_col or not abbr_col:
+        return 0.5
+    
+    for opp in opponents:
+        opp_row = standings_df[standings_df[abbr_col] == opp]
+        if not opp_row.empty:
+            # Use .iloc[0][win_pct_col] instead of .get() for consistency
+            try:
+                opp_win_rates.append(float(opp_row.iloc[0][win_pct_col]))
+            except:
+                opp_win_rates.append(0.5)
+        else:
+            opp_win_rates.append(0.5)
+
+    return np.mean(opp_win_rates) if opp_win_rates else 0.5
+
+
+def compute_sos(game_log_df, standings_df):
+    """
+    Compute Strength of Schedule (SOS) based on recent opponents' win rates.
+    """
+    if game_log_df is None or game_log_df.empty or standings_df is None or standings_df.empty:
+        return 0.5
+
+    opponents = []
+    for _, row in game_log_df.iterrows():
+        matchup = str(row.get("MATCHUP", ""))
+        if " @ " in matchup:
+            opponents.append(matchup.split(" @ ")[1])
+        elif " vs. " in matchup:
+            opponents.append(matchup.split(" vs. ")[1])
+
+    if not opponents:
+        return 0.5
+
+    return calculate_strength_of_schedule(opponents, standings_df)
 
 
 def analyze_recent_form(game_log_df):
@@ -76,6 +121,46 @@ def analyze_recent_form(game_log_df):
     # Point trend (for sparkline chart)
     point_trend = df["PTS"].tolist()[::-1] if "PTS" in df.columns else []
 
+    # B2B Detection (Last game was yesterday)
+    is_b2b = False
+    if n > 0 and "GAME_DATE" in df.columns:
+        try:
+            # Sort by date to get the most recent game
+            df['GAME_DATE_DT'] = pd.to_datetime(df['GAME_DATE'], format='mixed')
+            last_game_date = df['GAME_DATE_DT'].max().date()
+            
+            # Use US/Eastern as reference for 'today' or just today
+            from datetime import datetime
+            import pytz
+            tz = pytz.timezone('US/Eastern')
+            today = datetime.now(tz).date()
+            
+            if (today - last_game_date).days <= 1:
+                is_b2b = True
+        except:
+            pass
+
+    # Pace Calculation (Approximate: Possession count)
+    # Pace = 48 * ((Tm Pos + Opp Pos) / (2 * (Tm MP / 5)))
+    # A simplified version using box stats:
+    # Possessions = 0.96 * (FGA + TOV + 0.44 * FTA - OREB)
+    if all(col in df.columns for col in ["FGA", "TOV", "FTA", "OREB"]):
+        df["POSS"] = 0.96 * (df["FGA"] + df["TOV"] + 0.44 * df["FTA"] - df["OREB"])
+        avg_pace = df["POSS"].mean()
+    else:
+        avg_pace = 100.0
+
+    # Four Factors (Offensive)
+    # 1. eFG% = (FGM + 0.5 * FG3M) / FGA
+    # 2. TOV% = TOV / (FGA + 0.44 * FTA + TOV)
+    # 3. ORB% = OREB / (OREB + Opp DREB) -- Simplified as OREB / (OREB + Opp REB - Opp OREB)
+    # 4. FTR = FTA / FGA
+    
+    efg_pct = (df["FGM"].sum() + 0.5 * df["FG3M"].sum()) / df["FGA"].sum() if "FGA" in df.columns else 0.5
+    tov_pct = df["TOV"].sum() / (df["FGA"].sum() + 0.44 * df["FTA"].sum() + df["TOV"].sum()) if "FGA" in df.columns else 0.15
+    orb_pct = df["OREB"].sum() / (df["REB"].sum()) if "REB" in df.columns else 0.25 # Simplified proxy
+    ft_rate = df["FTA"].sum() / df["FGA"].sum() if "FGA" in df.columns else 0.2
+    
     return {
         "games_played": n,
         "wins": wins,
@@ -94,6 +179,14 @@ def analyze_recent_form(game_log_df):
         "avg_turnovers": round(avg_turnovers, 1),
         "last_5_record": last_5_record,
         "point_trend": point_trend,
+        "is_b2b": is_b2b,
+        "pace": round(avg_pace, 1),
+        "four_factors": {
+            "efg_pct": round(efg_pct * 100, 1),
+            "tov_pct": round(tov_pct * 100, 1),
+            "orb_pct": round(orb_pct * 100, 1),
+            "ft_rate": round(ft_rate, 3)
+        }
     }
 
 
@@ -262,14 +355,21 @@ def compute_team_strength_score(recent_form, home_split, away_split, off_rating,
         streak_val = -streak_val
     streak_score = _normalize_score(streak_val, -10, 10)
 
+    # SOS factor (normalized around 0.5)
+    sos_val = recent_form.get("sos", 0.5)
+    sos_score = _normalize_score(sos_val, 0.35, 0.65)
+
     # Weighted composite
     strength = (
-        w["recent_win_rate"] * win_rate_score +
-        w["offensive_rating"] * off_score +
-        w["defensive_rating"] * def_score +
-        w["home_away_adj"] * ha_score +
-        w["h2h_factor"] * h2h_score +
-        w["streak_momentum"] * streak_score
+        (1 - SOS_WEIGHT) * (
+            w["recent_win_rate"] * win_rate_score +
+            w["offensive_rating"] * off_score +
+            w["defensive_rating"] * def_score +
+            w["home_away_adj"] * ha_score +
+            w["h2h_factor"] * h2h_score +
+            w["streak_momentum"] * streak_score
+        ) +
+        SOS_WEIGHT * sos_score
     )
 
     return round(max(0, min(100, strength)), 1)
@@ -279,16 +379,21 @@ def get_full_team_analysis(team_id, vs_team_id, is_home=True):
     """Run full team analysis pipeline and return all metrics."""
     from data_fetcher import (
         get_team_game_log, get_team_full_game_log,
-        get_head_to_head
+        get_head_to_head, get_league_standings
     )
 
     # Fetch data
     recent_log = get_team_game_log(team_id)
     full_log = get_team_full_game_log(team_id)
     h2h_log = get_head_to_head(team_id, vs_team_id)
+    standings = get_league_standings()
 
     # Analyze
     recent_form = analyze_recent_form(recent_log)
+    
+    # Add SOS to recent form
+    sos = compute_sos(recent_log, standings)
+    recent_form["sos"] = sos
     home_split = analyze_home_away_splits(full_log, is_home=True)
     away_split = analyze_home_away_splits(full_log, is_home=False)
     off_rtg = compute_offensive_rating(recent_log)
@@ -302,15 +407,45 @@ def get_full_team_analysis(team_id, vs_team_id, is_home=True):
         off_rtg, def_rtg, h2h, is_home
     )
 
+    # Efficiency Ratings (Per 100 Possessions)
+    # ORtg = 100 * (PTS / POSS)
+    # DRtg = 100 * (Opp PTS / POSS)
+    # POSS calculation needs TOV, FGA, FTA, OREB
+    if all(col in recent_log.columns for col in ["FGA", "TOV", "FTA", "OREB"]):
+        poss = 0.96 * (recent_log["FGA"] + recent_log["TOV"] + 0.44 * recent_log["FTA"] - recent_log["OREB"])
+        poss_sum = poss.sum()
+        pts_sum = recent_log["PTS"].sum()
+        
+        # Pro-level Defensive Rating calculation (Safely Handle Opponent PTS)
+        if "PLUS_MINUS" in recent_log.columns:
+            opp_pts_sum = recent_log["PTS"].sum() - recent_log["PLUS_MINUS"].sum()
+        else:
+            opp_pts_sum = recent_form["avg_opp_points"] * len(recent_log)
+        
+        if poss_sum > 0:
+            ortg = 100 * (pts_sum / poss_sum)
+            drtg = 100 * (opp_pts_sum / poss_sum)
+        else:
+            ortg = recent_form["avg_points"]
+            drtg = recent_form["avg_opp_points"]
+    else:
+        ortg = recent_form["avg_points"]
+        drtg = recent_form["avg_opp_points"]
+
+    # Home/Away Split Detection
+    home_win_rate = home_split.get("win_rate", 0.5)
+    away_win_rate = away_split.get("win_rate", 0.5)
+
     return {
         "team_id": team_id,
         "is_home": is_home,
-        "recent_form": recent_form,
-        "home_split": home_split,
-        "away_split": away_split,
-        "offensive_rating": off_rtg,
-        "defensive_rating": def_rtg,
-        "pace": pace,
-        "head_to_head": h2h,
         "strength_score": strength,
+        "offensive_rating": round(ortg, 1),
+        "defensive_rating": round(drtg, 1),
+        "pace": round(pace, 1),
+        "recent_form": recent_form,
+        "league_rank": recent_form.get("league_rank", 15),
+        "sos": sos,
+        "home_win_rate": round(home_win_rate, 3),
+        "away_win_rate": round(away_win_rate, 3),
     }

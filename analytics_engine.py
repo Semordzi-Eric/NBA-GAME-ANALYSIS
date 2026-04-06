@@ -4,122 +4,190 @@ Predicts game outcomes, identifies mismatches, and computes expected totals.
 """
 import numpy as np
 import pandas as pd
-from config import HOME_COURT_ADVANTAGE
+from config import (
+    HOME_COURT_ADVANTAGE, REST_PENALTIES, 
+    STAR_ABSENCE_ORTG_MULTIPLIER, STAR_ABSENCE_DRTG_MULTIPLIER,
+    USAGE_REDISTRIBUTION_BOOST
+)
 
+
+import math
+import os
+import joblib
+import pandas as pd
+
+# Try loading the ML model globally
+MODEL_PATH = "nba_model.joblib"
+ml_model_payload = None
+if os.path.exists(MODEL_PATH):
+    try:
+        ml_model_payload = joblib.load(MODEL_PATH)
+    except Exception as e:
+        print(f"Failed to load ML model: {e}")
 
 def predict_game_outcome(home_team_analysis, away_team_analysis, home_players=None, away_players=None):
     """
-    Predict game outcome probabilities using team strength differential.
-    Uses logistic function calibrated to NBA historical data.
-    
-    Returns: dict with win probabilities for both teams and injury news metadata.
+    Predict game outcome probabilities using Proficiency/Efficiency differentials.
+    Uses Pace-adjusted efficiency margins and Mismatch detection.
     """
-    home_strength = home_team_analysis["strength_score"]
-    away_strength = away_team_analysis["strength_score"]
+    # 1. Base Efficiency Margin
+    # Adjust for B2B/Rest
+    h_rest_penalty = REST_PENALTIES["b2b"] if home_team_analysis["recent_form"].get("is_b2b") else 0
+    a_rest_penalty = REST_PENALTIES["b2b"] if away_team_analysis["recent_form"].get("is_b2b") else 0
+    
+    # Base Ratings
+    h_ortg = home_team_analysis["offensive_rating"]
+    h_drtg = home_team_analysis["defensive_rating"]
+    a_ortg = away_team_analysis["offensive_rating"]
+    a_drtg = away_team_analysis["defensive_rating"]
+    
+    # Player absence impacts (ORtg reduction)
+    h_penalty = sum([p["impact_score"] * STAR_ABSENCE_ORTG_MULTIPLIER for p in home_players if p.get("is_missing")])
+    a_penalty = sum([p["impact_score"] * STAR_ABSENCE_ORTG_MULTIPLIER for p in away_players if p.get("is_missing")])
+    h_def_pen = sum([p["impact_score"] * STAR_ABSENCE_DRTG_MULTIPLIER for p in home_players if p.get("is_missing")])
+    a_def_pen = sum([p["impact_score"] * STAR_ABSENCE_DRTG_MULTIPLIER for p in away_players if p.get("is_missing")])
 
-    # --- NEWS/INJURY PENALTY LOGIC ---
-    def calculate_missing_player_penalty(players_list):
-        penalty = 0.0
-        missing_players = []
-        if players_list:
-            # Check the top 3 players by inherent impact
-            for p in players_list[:3]:
-                # If they played extremely few games in the recent window, they are likely injured.
-                if p.get("games_analyzed", 0) <= 2:
-                    impact = p.get("impact_score", 50)
-                    penalty += (impact * 0.15)
-                    missing_players.append(p.get("player_name", "Key Player"))
-        return penalty, missing_players
+    h_ortg -= h_penalty
+    h_drtg += h_def_pen
+    a_ortg -= a_penalty
+    a_drtg += a_def_pen
+    
+    # Home/Away win rate bonus (0.1 win rate diff ≈ 1.0 efficiency unit)
+    h_bonus = (home_team_analysis.get("home_win_rate", 0.5) - 0.5) * 10
+    a_bonus = (away_team_analysis.get("away_win_rate", 0.5) - 0.5) * 10
+    
+    # 2. Predicted Efficiency Margin (per 100 possessions)
+    h_adv = (h_ortg - a_drtg)
+    a_adv = (a_ortg - h_drtg)
+    
+    # 3. Pace Scaling
+    h_pace = home_team_analysis["recent_form"].get("pace", 100.0)
+    a_pace = away_team_analysis["recent_form"].get("pace", 100.0)
+    game_pace = (h_pace + a_pace) / 2
+    
+    # Margin per game
+    net_margin = (h_adv - a_adv) * (game_pace / 100)
+    net_margin += HOME_COURT_ADVANTAGE + h_bonus - a_bonus
+    net_margin -= (h_rest_penalty - a_rest_penalty)
+    
+    # 4. Mismatch Detection (Four Factors)
+    mismatch_score = 0
+    mismatch_reasons = []
+    
+    h_ff = home_team_analysis["recent_form"]["four_factors"]
+    a_ff = away_team_analysis["recent_form"]["four_factors"]
+    
+    # Highlighted Game for Mismatch Labels
+    home_abbr = home_team_analysis.get("team_id", "Home")
+    away_abbr = away_team_analysis.get("team_id", "Away")
 
-    home_penalty, home_missing = calculate_missing_player_penalty(home_players) if home_players else (0, [])
-    away_penalty, away_missing = calculate_missing_player_penalty(away_players) if away_players else (0, [])
-
-    home_strength -= home_penalty
-    away_strength -= away_penalty
-
-    # Strength differential (positive = home team stronger)
-    strength_diff = home_strength - away_strength
-
-    # Add home court advantage (equivalent to ~3.5 points historically)
-    # Convert to strength score units: 3.5 points ≈ 5 strength units
-    home_advantage_units = 5.0
-    adjusted_diff = strength_diff + home_advantage_units
-
-    # Logistic function for win probability
-    # Steepness calibrated: 10-point diff ≈ 70% win probability
-    k = 0.08  # steepness parameter
-    home_win_prob = 1 / (1 + np.exp(-k * adjusted_diff))
-
-    # Clamp probabilities to realistic ranges
-    home_win_prob = max(0.15, min(0.92, home_win_prob))
-    away_win_prob = 1 - home_win_prob
-
-    # Compute predicted spread
-    # Rough conversion: strength_diff * 0.35 ≈ point spread
-    predicted_spread = adjusted_diff * 0.35
-
-    # Confidence in prediction (based on data quality)
-    home_games = home_team_analysis["recent_form"]["games_played"]
-    away_games = away_team_analysis["recent_form"]["games_played"]
-    data_confidence = min(100, ((home_games + away_games) / 20) * 100)
-
+    # ORB vs DRB Mismatch
+    if h_ff["orb_pct"] > 28 and a_ff["orb_pct"] < 21:
+        mismatch_score += 1.5
+        mismatch_reasons.append(f"{home_abbr} Glass Dominance")
+    elif a_ff["orb_pct"] > 28 and h_ff["orb_pct"] < 21:
+        mismatch_score -= 1.5
+        mismatch_reasons.append(f"{away_abbr} Glass Dominance")
+        
+    # TOV Pressure
+    if a_ff["tov_pct"] > 16.5 and h_ff["tov_pct"] < 13:
+        mismatch_score += 1.0
+        mismatch_reasons.append(f"{home_abbr} Possession Security")
+        
+    net_margin += mismatch_score
+    
+    # ---------------------------------------------------------
+    # MACHINE LEARNING ENGINE OVERRIDE
+    # ---------------------------------------------------------
+    if ml_model_payload is not None:
+        clf = ml_model_payload["model"]
+        feature_names = ml_model_payload["features"]
+        
+        # Build features according to how ml_pipeline.py extracts them
+        h_rest_advantage = (1 if not home_team_analysis["recent_form"].get("is_b2b") else 0) - (1 if not away_team_analysis["recent_form"].get("is_b2b") else 0)
+        form_diff = home_team_analysis.get("home_win_rate", 0.5) - away_team_analysis.get("away_win_rate", 0.5)
+        injury_impact_diff = a_penalty - h_penalty
+        
+        # We calculate the raw pre-injury stats to match the training data
+        net_ortg_diff = home_team_analysis["offensive_rating"] - away_team_analysis["defensive_rating"]
+        net_drtg_diff = home_team_analysis["defensive_rating"] - away_team_analysis["offensive_rating"]
+        net_efficiency_margin = net_ortg_diff - net_drtg_diff
+        
+        # Note: in training, h_adv incorporated injuries, but the network learns the weights directly from diffs.
+        
+        feature_dict = {
+            "net_ortg_diff": net_ortg_diff,
+            "net_drtg_diff": net_drtg_diff,
+            "net_efficiency_margin": net_efficiency_margin,
+            "home_rest_advantage": h_rest_advantage,
+            "form_diff": form_diff,
+            "injury_impact_diff": injury_impact_diff
+        }
+        
+        # Ensure correct exact order
+        try:
+            X_input = pd.DataFrame([[feature_dict[f] for f in feature_names]], columns=feature_names)
+            home_win_prob = clf.predict_proba(X_input)[0][1]
+            away_win_prob = 1.0 - home_win_prob
+            
+            # Map probabilities back to an implied spread using heuristic approximation for display
+            # net_margin = ln(p/(1-p)) / 0.16
+            if home_win_prob > 0.99: net_margin = 25.0
+            elif home_win_prob < 0.01: net_margin = -25.0
+            else: net_margin = math.log(home_win_prob / away_win_prob) / 0.15
+        except Exception as e:
+            # Fallback to heuristic
+            home_win_prob = 1 / (1 + math.exp(-0.16 * net_margin))
+            away_win_prob = 1 - home_win_prob
+    else:
+        # Win Probability (Logistic Heuristic)
+        home_win_prob = 1 / (1 + math.exp(-0.16 * net_margin))
+        away_win_prob = 1 - home_win_prob
+    
     return {
         "home_win_prob": round(home_win_prob, 3),
         "away_win_prob": round(away_win_prob, 3),
-        "predicted_spread": round(predicted_spread, 1),
-        "predicted_winner": "home" if home_win_prob > 0.5 else "away",
-        "margin_of_victory": abs(round(predicted_spread, 1)),
-        "data_confidence": round(data_confidence, 1),
-        "home_missing_players": home_missing,
-        "away_missing_players": away_missing,
+        "predicted_winner": "home" if net_margin >= 0 else "away",
+        "predicted_spread": round(net_margin, 1),
+        "home_penalty": round(h_penalty, 1),
+        "away_penalty": round(a_penalty, 1),
+        "game_pace": round(game_pace, 1),
+        "mismatch_score": round(mismatch_score, 1),
+        "mismatch_reasons": mismatch_reasons
     }
 
 
-def compute_expected_total(home_team_analysis, away_team_analysis):
-    """
-    Compute expected combined game total.
-    Uses pace-adjusted offensive/defensive ratings.
-    """
-    home_off = home_team_analysis["offensive_rating"]
-    home_def = home_team_analysis["defensive_rating"]
-    away_off = away_team_analysis["offensive_rating"]
-    away_def = away_team_analysis["defensive_rating"]
-    home_pace = home_team_analysis["pace"]
-    away_pace = away_team_analysis["pace"]
-
-    # League average pace and ratings for normalization
-    league_avg_pace = 100.0
-    league_avg_rating = 112.0
-
-    # Average pace for the game
-    game_pace = (home_pace + away_pace) / 2
-
-    # Pace adjustment factor
-    pace_factor = game_pace / league_avg_pace
-
-    # Expected points for each team
-    # Home team scores based on their offense vs away defense
-    home_expected = ((home_off + away_def) / 2) * pace_factor
-    # Away team scores based on their offense vs home defense  
-    away_expected = ((away_off + home_def) / 2) * pace_factor
-
-    # Small home court bump
-    home_expected += HOME_COURT_ADVANTAGE / 2
-    away_expected -= HOME_COURT_ADVANTAGE / 2
-
-    total = home_expected + away_expected
-
-    # Standard deviation for total (typically ~12-15 points in NBA)
-    total_std = 13.0
-
+def compute_expected_total(home_ana, away_ana, home_players=None, away_players=None):
+    # Use Efficiency Ratings * Pace
+    h_ortg = home_ana["offensive_rating"]
+    a_ortg = away_ana["offensive_rating"]
+    h_drtg = home_ana["defensive_rating"]
+    a_drtg = away_ana["defensive_rating"]
+    
+    # Average expected efficiency per side
+    h_exp = (h_ortg + a_drtg) / 2
+    a_exp = (a_ortg + h_drtg) / 2
+    
+    # Scaling for missing players
+    h_penalty = sum([p["impact_score"] * STAR_ABSENCE_ORTG_MULTIPLIER for p in home_players if p.get("is_missing")])
+    a_penalty = sum([p["impact_score"] * STAR_ABSENCE_ORTG_MULTIPLIER for p in away_players if p.get("is_missing")])
+    
+    h_exp -= (h_penalty / 2)
+    a_exp -= (a_penalty / 2)
+    
+    # Final projection based on game-specific pace
+    h_pace = home_ana["recent_form"].get("pace", 100.0)
+    a_pace = away_ana["recent_form"].get("pace", 100.0)
+    game_pace = (h_pace + a_pace) / 2
+    
+    expected_total = (h_exp + a_exp) * (game_pace / 100)
+    
     return {
-        "expected_total": round(total, 1),
-        "home_expected_points": round(home_expected, 1),
-        "away_expected_points": round(away_expected, 1),
-        "total_std": total_std,
-        "total_range_low": round(total - total_std, 1),
-        "total_range_high": round(total + total_std, 1),
-        "game_pace": round(game_pace, 1),
+        "expected_total": round(expected_total, 1),
+        "home_proj_pts": round(h_exp * (game_pace / 100), 1),
+        "away_proj_pts": round(a_exp * (game_pace / 100), 1),
+        "total_std": 15.0, # Box score totals have higher variance
+        "pace": round(game_pace, 1)
     }
 
 
@@ -199,8 +267,8 @@ def compute_segment_projections(game_total):
     1st half is usually ~49% of the total scoring (second half has fouling/OT risk).
     """
     first_half_total = game_total["expected_total"] * 0.49
-    fh_home_points = game_total["home_expected_points"] * 0.49
-    fh_away_points = game_total["away_expected_points"] * 0.49
+    fh_home_points = game_total["home_proj_pts"] * 0.49
+    fh_away_points = game_total["away_proj_pts"] * 0.49
     fh_spread = fh_home_points - fh_away_points
     
     return {
@@ -221,7 +289,7 @@ def generate_game_analysis(game, home_team_analysis, away_team_analysis,
     prediction = predict_game_outcome(home_team_analysis, away_team_analysis, home_players, away_players)
 
     # Expected total
-    total = compute_expected_total(home_team_analysis, away_team_analysis)
+    total = compute_expected_total(home_team_analysis, away_team_analysis, home_players, away_players)
     
     # First half segments
     first_half = compute_segment_projections(total)
